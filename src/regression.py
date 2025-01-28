@@ -14,71 +14,120 @@ def mnk(data_x, data_y, use_systematic = False, systematic_eror = None):
 
 
 def chi2_regression_1d(data_x, data_y, y_err):
+    # Масштабируем данные
+    x_scale = np.max(data_x)
+    y_scale = np.max(data_y)
+
+    data_x_scaled = data_x / x_scale
+    data_y_scaled = data_y / y_scale
+    y_err_scaled = y_err / y_scale
+
     def chi2_d1(coeffs):
         a, b = coeffs
-        model = a * data_x + b
-        return np.sum(((data_y - model) / y_err) ** 2)
+        model = a * data_x_scaled + b
+        return np.sum(((data_y_scaled - model) / y_err_scaled) ** 2)
     
     initial_coeffs = [1, 0]
 
-    result = minimize(chi2_d1, initial_coeffs)
+    # Используем метод оптимизации с поддержкой Гессе
+    result = minimize(chi2_d1, initial_coeffs, method='BFGS')
 
-    slope, intercept = result.x
+    slope_scaled, intercept_scaled = result.x
     chi2_value = result.fun
 
-    # The Gesse Matric
-    hessian_inv = result.hess_inv
+    # Проверяем доступность обратной матрицы Гессе
+    if hasattr(result, 'hess_inv'):
+        hessian_inv = result.hess_inv  # Обратная матрица Гессе
+        slope_err_scaled = math.sqrt(hessian_inv[0, 0])
+        intercept_err_scaled = math.sqrt(hessian_inv[1, 1])
+    else:
+        slope_err_scaled = None
+        intercept_err_scaled = None
 
-    slope_err = math.sqrt(hessian_inv[0, 0])
-    intercept_err = math.sqrt(hessian_inv[1, 1])
+    # Пересчитываем коэффициенты и ошибки в исходный масштаб
+    slope = slope_scaled * (y_scale / x_scale)
+    intercept = intercept_scaled * y_scale
+    slope_err = slope_err_scaled * (y_scale / x_scale) if slope_err_scaled is not None else None
+    intercept_err = intercept_err_scaled * y_scale if intercept_err_scaled is not None else None
 
     return slope, intercept, slope_err, intercept_err, chi2_value
 
 def chi2_regression_2d(data_x, data_y, x_err, y_err):
+    # Масштабируем данные
+    x_scale = np.max(np.abs(data_x))
+    y_scale = np.max(np.abs(data_y))
+
+    data_x_scaled = data_x / x_scale
+    data_y_scaled = data_y / y_scale
+    y_err_scaled = y_err / y_scale
+    x_err_scaled = x_err / x_scale
+
+    # Определяем функцию для минимизации
     def chi2_d2(coeffs):
         a, b = coeffs
-        model = a * data_x + b
-        sigma_total = np.sqrt(y_err**2 + (a * x_err)**2)
-        return np.sum(((data_y - model) / sigma_total) ** 2)
-    
-    initial_coeffs = [1, 0]
+        model = a * data_x_scaled + b
+        sigma_total = np.sqrt(y_err_scaled**2 + (a * x_err_scaled)**2) + 1e-10
+        chi2 = np.sum(((data_y_scaled - model) / sigma_total) ** 2)
+        regularization = 1e-5 * (a**2 + b**2)  # Регуляризация
+        return chi2 + regularization
 
-    result = minimize(chi2_d2, initial_coeffs)
+    # Улучшаем начальную оценку коэффициентов
+    coeffs_initial = np.polyfit(data_x_scaled, data_y_scaled, 1)
+    initial_coeffs = [coeffs_initial[0], coeffs_initial[1]]
 
-    slope, intercept = result.x
+    # Оптимизация
+    result = minimize(chi2_d2, initial_coeffs, method='Powell')  # Используем метод Powell
+
+    # Проверка успешности оптимизации
+    if not result.success:
+        raise RuntimeError("Оптимизация не удалась: " + result.message)
+
+    slope_scaled, intercept_scaled = result.x
     chi2_value = result.fun
 
-    hessian_inv = result.hess_inv
-    intercept_err = math.sqrt(hessian_inv[1, 1])
-
+    # Определяем весовую функцию
     def weights(a, x_err, y_err):
-        return 1 / (y_err**2 + (a * x_err)**2)
+        return 1 / (y_err**2 + (a * x_err)**2 + 1e-10)
 
-    # Среднее значение x
     def weighted_mean(x, w):
         return np.sum(w * x) / np.sum(w)
 
-    # Аналитическое вычисление ошибки наклона
     def slope_error(x, y, x_err, y_err, a):
         w = weights(a, x_err, y_err)
         x_mean = weighted_mean(x, w)
         sigma_a2 = 1 / np.sum(w * (x - x_mean) ** 2)
         return np.sqrt(sigma_a2)
-    
-    def intercept_error(x, x_err, y_err, a):
-        w = weights(a, x_err, y_err)
-        sigma_a2 = (1 / np.sum(w)*np.sum(x**2))
-        return np.sqrt(sigma_a2)
 
-    # Вычисление ошибки наклона
-    slope_err = slope_error(data_x, data_y, x_err, y_err, slope)
-    intercept_err = intercept_error(data_x, x_err, y_err, slope)
+    def intercept_error(x, y, x_err, y_err, a, b):
+        w = weights(a, x_err, y_err)
+        x_mean = weighted_mean(x, w)
+        sigma_b2 = 1 / np.sum(w) + (x_mean ** 2) / np.sum(w * (x - x_mean) ** 2)
+        return np.sqrt(sigma_b2)
+
+    slope_err_scaled = slope_error(data_x_scaled, data_y_scaled, x_err_scaled, y_err_scaled, slope_scaled)
+    intercept_err_scaled = intercept_error(data_x_scaled, data_y_scaled, x_err_scaled, y_err_scaled, slope_scaled, intercept_scaled)
+
+    # Пересчёт коэффициентов и ошибок в исходный масштаб
+    slope = slope_scaled * (y_scale / x_scale)
+    intercept = intercept_scaled * y_scale
+    slope_err = slope_err_scaled * (y_scale / x_scale) if slope_err_scaled is not None else None
+    intercept_err = intercept_err_scaled * y_scale if intercept_err_scaled is not None else None
+
     return slope, intercept, slope_err, intercept_err, chi2_value
 
 def monte_carlo_linear_model(data_x, data_y, x_err, y_err, count_iter = 100):
     a_values = [1]
     b_values = [0]
     
+    x_scale = np.max(data_x)
+    y_scale = np.max(data_y)
+
+    data_x = data_x / x_scale
+    data_y = data_y / y_scale
+    y_err = y_err / y_scale
+    x_err = x_err / x_scale
+
+
     residuals = data_y - (a_values[-1] * data_x + b_values[-1])
     rmse = np.sqrt(np.sum(residuals**2)/data_x.shape[0])
     # Цикл Монте-Карло
@@ -100,19 +149,31 @@ def monte_carlo_linear_model(data_x, data_y, x_err, y_err, count_iter = 100):
     intercept = np.mean(b_values)
     slope_err = np.std(a_values)
     intercept_err = np.std(b_values)
+
+    slope = slope * (y_scale / x_scale)
+    intercept = intercept * y_scale
+    slope_err = slope_err * (y_scale / x_scale) if slope_err is not None else None
+    intercept_err = intercept_err * y_scale if intercept_err is not None else None
     return slope, intercept, slope_err, intercept_err
 
 
-def bootstrap_linear(data_x, data_y, x_err, y_err, count_iter = 100):
-    
+def bootstrap_linear(data_x, data_y, x_err, y_err, count_iter=100):
     # Бутстрэп для оценки погрешности коэффициентов
     N = len(data_x)
     slope_bootstrap = []
     intercept_bootstrap = []
 
+    # Преобразование данных в numpy массивы
+    data_x = np.array(data_x)
+    data_y = np.array(data_y)
+    x_err = np.array(x_err)
+    y_err = np.array(y_err)
+
     for _ in range(count_iter):
         # Генерация выборки с возвращением
         indices = np.random.choice(N, size=N, replace=True)
+        
+        # Добавление случайных ошибок с учетом погрешности
         x_bootstrap = data_x[indices] + np.random.normal(0, x_err[indices])
         y_bootstrap = data_y[indices] + np.random.normal(0, y_err[indices])
         
